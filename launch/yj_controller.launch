@@ -13,7 +13,7 @@
         <param name="J_by" value="0.023950"/>
         <param name="J_bz" value="0.044000"/>
         <param name="g" value="9.81"/>
-        <param name="T_max" value="34.0"/>
+        <param name="T_max" value="10.0"/>
         <param name="Tau_max_x" value="2.97"/>
         <param name="Tau_max_y" value="2.97"/>
         <param name="Tau_max_z" value="0.274"/>

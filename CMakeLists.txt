@@ -21,6 +21,7 @@ find_package(builtin_interfaces REQUIRED)
 find_package(eigen3_cmake_module REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -41,6 +42,7 @@ ament_target_dependencies(yj_controller_node
   geometry_msgs
   sensor_msgs
   Eigen3
+  nav_msgs
 )
 
 # 실행 파일 설치 경로 설정
