@@ -1,3 +1,7 @@
+// import rclcpp
+#include <rclcpp/rclcpp.hpp>
+
+// import px4_msgs
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/actuator_motors.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
@@ -6,94 +10,130 @@
 #include <px4_msgs/msg/vehicle_thrust_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_torque_setpoint.hpp>
 #include <px4_msgs/srv/vehicle_command.hpp>
+
+// import ROS2 standard messages
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
-#include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/int32.hpp>
+
+// import so3_utils
+#include "so3_utils.hpp"
+
+// import other libraries
 #include <stdint.h>
 #include <Eigen/Dense>
 #include <unsupported/Eigen/MatrixFunctions>
 #include <chrono>
 #include <iostream>
 #include <string>
-#include <std_msgs/msg/int32.hpp>
-#include "so3_utils.hpp"
 #include <cmath>
 
+// used namespace list 
 using namespace std::chrono;
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
-// optitrack odometry 받아와서 --> pose_callback 함수 바꾸기. (position, orientation, linear velocity)
-// IMU angular rate를 받아올 수 있는가?
 
 class MotorControl : public rclcpp::Node
 {
 public:
     MotorControl(std::string px4_namespace) :
-		Node("motor_control_srv"),
-      	state_{State::init},
-      	service_result_{0},
-      	service_done_{false}
-	{
-		// uxrQoS_t qos_pub = {
-		// 	.durability = UXR_DURABILITY_VOLATILE,
-		// 	.reliability = UXR_RELIABILITY_BEST_EFFORT,
-		// 	.history = UXR_HISTORY_KEEP_LAST,
-		// 	.depth = queue_depth,
-		// };
+      //Initialize node
+      Node("motor_control"),
 
-		// uxrQoS_t qos_sub = {
-		// 	.durability = UXR_DURABILITY_TRANSIENT_LOCAL,
-		// 	.reliability = UXR_RELIABILITY_BEST_EFFORT,
-		// 	.history = UXR_HISTORY_KEEP_LAST,
-		// 	.depth = 0,
-		// };
+      //Initialize state variables
+      state_{State::init},
+      service_result_{0},
+      service_done_{false}
+   {
+      /** 
+         0. Configure QoS profiles for publish and subscribe
+      */
 
-        // QoS setup
-        rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
-        auto qos_sub = rclcpp::QoS(
-            rclcpp::QoSInitialization(qos_profile.history, qos_profile.depth),
-            qos_profile
-        );
+      //0.1. Configure QoS profile for sensor data subscriber
+      auto sensor_qos = rclcpp::QoS(
+         rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_sensor_data)
+      );
 
-		rclcpp::QoS qos_pub(rclcpp::KeepLast(10));  // 최신 10개 메시지 유지
-		qos_pub.reliable();  // 신뢰성 높은 전송
-		qos_pub.durability_volatile();  // 데이터 지속성 없음
+      //0.2. Configure QoS profile for actuator motors
+      auto motor_qos = rclcpp::QoS(
+         rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default)
+      )
+      .keep_last(1)
+      .reliable()
+      .durability_volatile()
+      .deadline(10ms);
+ 
+      //0.3. Configure QoS profile for other publishers
+      auto qos_publisher = rclcpp::QoS(
+         rclcpp::QoSInitialization::from_rmw(rmw_qos_profile_default)
+      )
+      .keep_last(10)
+      .reliable()
+      .durability_volatile();
 
-        // Subscribe
+      /**
+         1. Create Subscribers
+      */
       vehicle_odometry_subscriber_ = this->create_subscription<VehicleOdometry>(
-              px4_namespace + "out/vehicle_odometry", qos_sub,
-              std::bind(&MotorControl::odometry_callback, this, std::placeholders::_1));
-      optitrack_odometry_subscriber_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/optitrackKYJLJW", qos_sub,
-            std::bind(&MotorControl::optitrack_odometry_callback, this, std::placeholders::_1));
+         px4_namespace + "out/vehicle_odometry", sensor_qos,
+         std::bind(&MotorControl::odometry_callback, this, std::placeholders::_1)
+      );
       ui_command_subscriber_ = this->create_subscription<std_msgs::msg::Int32>(
-              "ui_command", qos_sub,
-              std::bind(&MotorControl::ui_command_callback, this, std::placeholders::_1));
+         "ui_command", sensor_qos,
+         std::bind(&MotorControl::ui_command_callback, this, std::placeholders::_1)
+      );
       
-      // Publish
-      offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(px4_namespace+"in/offboard_control_mode", qos_pub);
-      // actuator_motors_publisher_ = this->create_publisher<ActuatorMotors>(px4_namespace+"in/actuator_motors", qos_pub);
+      /**
+         2. Create Publishers
+      */
+      offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>(
+         px4_namespace+"in/offboard_control_mode", qos_publisher
+      );
+      actuator_motors_publisher_ = this->create_publisher<ActuatorMotors>(
+         px4_namespace+"in/actuator_motors", qos_publisher
+      );
       rpy_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>(
-              "/rpy", qos_pub);
+         "/rpy", qos_publisher
+      );
       rpy_des_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>(
-              "/rpy_des", qos_pub);
-      thrust_publisher_ = this->create_publisher<VehicleThrustSetpoint>(px4_namespace+"in/vehicle_thrust_setpoint", 10);
-      torque_publisher_ = this->create_publisher<VehicleTorqueSetpoint>(px4_namespace+"in/vehicle_torque_setpoint", 10);
+         "/rpy_des", qos_publisher
+      );
        
-      // Client
-        vehicle_command_client_ = this->create_client<px4_msgs::srv::VehicleCommand>(px4_namespace+"vehicle_command");
 
-        // Wait for PX4 connection
-        RCLCPP_INFO(this->get_logger(), "Starting Direct Motor Control example with PX4 services");
-      	RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for " << px4_namespace << "vehicle_command service");
-      	while (!vehicle_command_client_->wait_for_service(1s)) {
-        	if (!rclcpp::ok()) {
-            	RCLCPP_ERROR(this->get_logger(), "Interrupted while waiting for the service. Exiting.");
-            	return;
-         	}
-         	RCLCPP_INFO(this->get_logger(), "service not available, waiting again...");
-      	}
-        load_parameters();
+      /**
+         3. Create Clients and Check PX4 Connection
+      */
+      vehicle_command_client_ = this->create_client<px4_msgs::srv::VehicleCommand>(
+         px4_namespace+"vehicle_command"
+      );
+
+      RCLCPP_INFO(this->get_logger(), "Starting Motor Control Node");
+      RCLCPP_INFO_STREAM(this->get_logger(), "Waiting for " << px4_namespace << "vehicle_command service");
+      // Check if PX4 is connected to the vehicle
+      while (!vehicle_command_client_->wait_for_service(1s)) {
+         if (!rclcpp::ok()) {
+            RCLCPP_ERROR(this->get_logger(), "Interrupted while waiting for the service. Exiting.");  // If interrupted, exit
+            return;
+         }
+      RCLCPP_INFO(this->get_logger(), "service not available, waiting again...");   // If not interrupted, wait for 1 second and try again
+      }
+   
+      /**
+         4. Load parameters from launch file
+      */
+      load_parameters();   
+      
+      /**
+         5. Callback Functions for the timers
+      */
+      timer_ = this->create_wall_timer(5ms, std::bind(&MotorControl::timer_callback, this));
+
+
+
+
+
+
+
 
 		Flightflag = false;
 
@@ -147,7 +187,7 @@ public:
 
         // Main timer callback function
       	timer_ = this->create_wall_timer(5ms, std::bind(&MotorControl::timer_callback, this));
-    }
+   }
 
    	void switch_to_offboard_mode();
    	void arm();
@@ -825,7 +865,6 @@ int main(int argc, char *argv[])
    rclcpp::shutdown();
    return 0;
 }
-
 // For real hardware, launch file should be
       //   <param name="K_pos" value="[5.0, 5.0, 15.0]"/> <!---->
       //   <param name="K_vel" value="[0.3, 0.3, 0.8]"/> <!--[3.0, 3.0, 8.0]-->
